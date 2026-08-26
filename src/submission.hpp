@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
 #include <vector>
 
 class Grid {
@@ -27,26 +28,25 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
   const std::size_t rows = old_grid.rows();
   const std::size_t cols = old_grid.cols();
 
-  if (rows < 3 || cols < 3) {
-    for (std::size_t i = 0; i < rows; ++i) {
-      for (std::size_t j = 0; j < cols; ++j) {
-        new_grid(i, j) = old_grid(i, j);
-      }
-    }
+  if (rows == 0 || cols == 0) {
     return;
-  }
-
-  for (std::size_t j = 0; j < cols; ++j) {
-    new_grid(0, j) = old_grid(0, j);
-    new_grid(rows - 1, j) = old_grid(rows - 1, j);
-  }
-  for (std::size_t i = 0; i < rows; ++i) {
-    new_grid(i, 0) = old_grid(i, 0);
-    new_grid(i, cols - 1) = old_grid(i, cols - 1);
   }
 
   const double* src = old_grid.data();
   double* dst = new_grid.data();
+
+  if (rows < 3 || cols < 3) {
+    std::memcpy(dst, src, rows * cols * sizeof(double));
+    return;
+  }
+
+  std::memcpy(dst, src, cols * sizeof(double));
+  std::memcpy(dst + (rows - 1) * cols, src + (rows - 1) * cols, cols * sizeof(double));
+
+  for (std::size_t i = 1; i < rows - 1; ++i) {
+    dst[i * cols] = src[i * cols];
+    dst[(i + 1) * cols - 1] = src[(i + 1) * cols - 1];
+  }
 
 #pragma omp parallel for
   for (std::size_t i = 1; i < rows - 1; ++i) {
