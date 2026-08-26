@@ -16,6 +16,9 @@ public:
   std::size_t rows() const { return rows_; }
   std::size_t cols() const { return cols_; }
 
+  double* data() { return data_.data(); }
+  const double* data() const { return data_.data(); }
+
   double& operator()(std::size_t i, std::size_t j) { return data_[i * cols_ + j]; }
   double  operator()(std::size_t i, std::size_t j) const { return data_[i * cols_ + j]; }
 };
@@ -42,11 +45,17 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
     new_grid(i, cols - 1) = old_grid(i, cols - 1);
   }
 
+  const double* src = old_grid.data();
+  double* dst = new_grid.data();
+
   for (std::size_t i = 1; i < rows - 1; ++i) {
+    const double* up = src + (i - 1) * cols;
+    const double* mid = up + cols;
+    const double* down = mid + cols;
+    double* __restrict out = dst + i * cols;
     for (std::size_t j = 1; j < cols - 1; ++j) {
-      new_grid(i, j) = 0.5 * old_grid(i, j) +
-                       0.125 * (old_grid(i - 1, j) + old_grid(i + 1, j) +
-                                old_grid(i, j - 1) + old_grid(i, j + 1));
+      out[j] = 0.5 * mid[j] +
+               0.125 * (up[j] + down[j] + mid[j - 1] + mid[j + 1]);
     }
   }
 }
