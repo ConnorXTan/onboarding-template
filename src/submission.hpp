@@ -128,6 +128,8 @@ namespace detail {
 // `cols` is the logical row width, never the storage stride, so the kernel
 // cannot reach anything outside the row it was handed. The loop covers only
 // the interior 1 .. cols-2 so `mid[j - 1]` and `mid[j + 1]` stay inside the row.
+// Precondition: cols >= 3, so the row has an interior; apply_stencil routes
+// narrower grids to copy_row instead of asking the kernel to reason about them.
 inline void stencil_row(
   const double* __restrict up,
   const double* __restrict mid,
@@ -144,6 +146,14 @@ inline void stencil_row(
   out[cols - 1] = mid[cols - 1];
 }
 
+
+// Copies the `cols` live cells of one row. Rows are addressed through views,
+// so this never touches the padding after a row, and the old whole-buffer
+// memcpy of rows * cols doubles (wrong once stride != cols) is not needed.
+inline void copy_row(const double* src, double* dst, std::size_t cols) {
+  std::memcpy(dst, src, cols * sizeof(double));
+}
+
 }  // namespace detail
 
 inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
@@ -153,25 +163,31 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
   assert(&old_grid != &new_grid);
   assert(old_grid.rows() == new_grid.rows() && old_grid.cols() == new_grid.cols());
 
-  const ConstGridView in = old_grid.view();
-  const GridView out = new_grid.view();
-  const std::size_t rows = in.rows;
-  const std::size_t cols = in.cols;
+  const std::size_t rows = old_grid.rows();
+  const std::size_t cols = old_grid.cols();
 
   if (rows == 0 || cols == 0) {
     return;
   }
 
+  const ConstGridView in = old_grid.view();
+  const GridView out = new_grid.view();
+
   if (rows < 3 || cols < 3) {
-    // Every cell is boundary, so the result is a copy. Copying the whole
-    // storage, padding included, is exactly the traffic of a row-by-row copy
-    // without the per-row bookkeeping.
-    std::memcpy(out.data, in.data, rows * in.stride * sizeof(double));
+    // No interior cell exists: every cell is on the boundary ring, so a step
+    // is an exact copy of each row. Handling it here lets the kernel assume a
+    // real interior instead of reasoning about empty loops on width 1 or 2.
+    for (std::size_t i = 0; i < rows; ++i) {
+      detail::copy_row(in.row(i), out.row(i), cols);
+    }
     return;
   }
 
-  std::memcpy(out.row(0), in.row(0), cols * sizeof(double));
-  std::memcpy(out.row(rows - 1), in.row(rows - 1), cols * sizeof(double));
+  // Boundary rows are copied here; boundary columns are written inside
+  // stencil_row. Every output row therefore has exactly one writer, so the
+  // parallel loop below shares no row between threads.
+  detail::copy_row(in.row(0), out.row(0), cols);
+  detail::copy_row(in.row(rows - 1), out.row(rows - 1), cols);
 
 #pragma omp parallel for schedule(static)
   for (std::size_t i = 1; i < rows - 1; ++i) {
