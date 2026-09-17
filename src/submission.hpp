@@ -189,7 +189,24 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
   detail::copy_row(in.row(0), out.row(0), cols);
   detail::copy_row(in.row(rows - 1), out.row(rows - 1), cols);
 
-#pragma omp parallel for schedule(static)
+  // Waking the thread pool costs microseconds per call even though the pool
+  // persists across calls (about 15 us with libgomp on macOS, a few on Linux).
+  // Below about 16k interior cells (a 128x128 grid) the serial loop finishes
+  // in a few microseconds, so the small correctness cases run serially and
+  // only grids with real work pay for the fork/join.
+  // Both are read only by the pragma, which a build without OpenMP drops.
+  [[maybe_unused]] constexpr std::size_t kMinInteriorCellsForParallel = std::size_t{1} << 14;
+  [[maybe_unused]] const std::size_t interior_cells = (rows - 2) * (cols - 2);
+
+  // schedule(static): every interior row is the same amount of work, so a
+  // static split gives each thread one contiguous band of rows. Its three-row
+  // input window then walks through its own L1/L2 without other threads'
+  // rows interleaved, and there is no scheduler traffic per chunk.
+  //
+  // Nothing is allocated, resized or looked up inside the region: the views
+  // were built once above and stencil_row is pure pointer arithmetic. The
+  // loop variable stays std::size_t, which OpenMP 3.0 and later accept.
+#pragma omp parallel for schedule(static) if(interior_cells >= kMinInteriorCellsForParallel)
   for (std::size_t i = 1; i < rows - 1; ++i) {
     detail::stencil_row(in.row(i - 1), in.row(i), in.row(i + 1), out.row(i), cols);
   }
