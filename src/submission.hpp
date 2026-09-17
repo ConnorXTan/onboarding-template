@@ -1,8 +1,5 @@
 #pragma once
 
-// Harness contract: Grid(rows, cols) zero-initialised, operator()(i, j) in
-// both forms, apply_stencil(old_grid, new_grid). Storage layout is internal.
-
 #include <cassert>
 #include <cstddef>
 #include <cstring>
@@ -12,8 +9,7 @@
 
 namespace detail {
 
-// 64-byte aligned storage so every row starts on a cache line; a plain
-// std::vector<double> only gets 16-byte alignment from malloc.
+// 64-byte aligned so every row starts on a cache line.
 template <typename T, std::size_t Alignment>
 struct aligned_allocator {
   static_assert((Alignment & (Alignment - 1)) == 0, "Alignment must be a power of two");
@@ -53,8 +49,7 @@ bool operator!=(const aligned_allocator<T, Alignment>&, const aligned_allocator<
 
 }  // namespace detail
 
-// Non-owning view: a pointer plus the stride needed to interpret it. row(i) is
-// the only way to a row base, so nothing outside Grid can index by cols.
+// row(i) is the only way to a row base; nothing outside Grid indexes by cols.
 struct ConstGridView {
   const double* data;
   std::size_t rows;
@@ -80,8 +75,7 @@ private:
   static constexpr std::size_t kAlignmentBytes = 64;
   static constexpr std::size_t kAlignmentDoubles = kAlignmentBytes / sizeof(double);
 
-  // Stride is cols rounded up to 8 doubles (one cache line). The padding is
-  // storage only: operator() and the kernel index by cols.
+  // cols rounded up to a cache line; the padding is storage only.
   static std::size_t padded_stride(std::size_t cols) {
     return (cols + kAlignmentDoubles - 1) / kAlignmentDoubles * kAlignmentDoubles;
   }
@@ -108,10 +102,7 @@ public:
 
 namespace detail {
 
-// Five-point update of one interior row. The only place restrict appears: out
-// is in the other grid's allocation and the three inputs are only read, so the
-// promise holds. Takes cols, not stride, so it cannot reach padding. Needs
-// cols >= 3.
+// restrict holds: out is in the other grid, the inputs are only read.
 inline void stencil_row(
   const double* __restrict up,
   const double* __restrict mid,
@@ -128,7 +119,6 @@ inline void stencil_row(
   out[cols - 1] = mid[cols - 1];
 }
 
-// Copies the live cells of one row, never the padding.
 inline void copy_row(const double* src, double* dst, std::size_t cols) {
   std::memcpy(dst, src, cols * sizeof(double));
 }
@@ -136,7 +126,6 @@ inline void copy_row(const double* src, double* dst, std::size_t cols) {
 }  // namespace detail
 
 inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
-  // Distinct, same-shaped grids: the kernel's restrict promise depends on it.
   assert(&old_grid != &new_grid);
   assert(old_grid.rows() == new_grid.rows() && old_grid.cols() == new_grid.cols());
 
@@ -151,25 +140,20 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
   const GridView out = new_grid.view();
 
   if (rows < 3 || cols < 3) {
-    // No interior: every cell is boundary, so the step is a row copy.
     for (std::size_t i = 0; i < rows; ++i) {
       detail::copy_row(in.row(i), out.row(i), cols);
     }
     return;
   }
 
-  // Boundary rows copied here, boundary columns inside stencil_row, so every
-  // output row has exactly one writer.
   detail::copy_row(in.row(0), out.row(0), cols);
   detail::copy_row(in.row(rows - 1), out.row(rows - 1), cols);
 
-  // Skip the fork/join on small grids: below ~16k interior cells the serial
-  // loop is cheaper. Only the pragma reads these, hence maybe_unused.
+  // Only the pragma reads these. Small grids skip the fork/join.
   [[maybe_unused]] constexpr std::size_t kMinInteriorCellsForParallel = std::size_t{1} << 14;
   [[maybe_unused]] const std::size_t interior_cells = (rows - 2) * (cols - 2);
 
-  // static: rows are equal work, so each thread gets one contiguous band and
-  // its three-row window stays in its own cache.
+  // static: equal rows, one contiguous band per thread.
 #pragma omp parallel for schedule(static) if(interior_cells >= kMinInteriorCellsForParallel)
   for (std::size_t i = 1; i < rows - 1; ++i) {
     detail::stencil_row(in.row(i - 1), in.row(i), in.row(i + 1), out.row(i), cols);
