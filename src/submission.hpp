@@ -1,5 +1,15 @@
 #pragma once
 
+// 2D heat diffusion: five-point stencil on a row-major grid.
+//
+// What the harness relies on: Grid(rows, cols) with every cell starting at
+// 0.0, the mutable and const operator()(i, j) to set initial conditions and
+// read results, and apply_stencil(old_grid, new_grid) writing the five-point
+// update of the interior into new_grid with the boundary ring copied and
+// old_grid untouched. It never touches the storage, so the layout below (one
+// 64-byte aligned, stride-padded allocation reached only through views) is
+// internal and free to change.
+
 #include <cassert>
 #include <cstddef>
 #include <cstring>
@@ -145,7 +155,6 @@ inline void stencil_row(
   }
   out[cols - 1] = mid[cols - 1];
 }
-
 
 // Copies the `cols` live cells of one row. Rows are addressed through views,
 // so this never touches the padding after a row, and the old whole-buffer
