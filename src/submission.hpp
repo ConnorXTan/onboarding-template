@@ -53,6 +53,31 @@ bool operator!=(const aligned_allocator<T, Alignment>&, const aligned_allocator<
 
 }  // namespace detail
 
+// Non-owning windows onto a grid's storage. A view carries the stride with
+// the pointer, so nothing outside Grid can compute `i * cols` and land on the
+// wrong row once rows are padded: `row(i)` is the only way to a row base.
+// A third dimension would add a plane stride and a `plane(k)` accessor here;
+// the kernel and the driver would not change.
+struct ConstGridView {
+  const double* data;
+  std::size_t rows;
+  std::size_t cols;
+  std::size_t stride;
+
+  const double* row(std::size_t i) const { return data + i * stride; }
+};
+
+struct GridView {
+  double* data;
+  std::size_t rows;
+  std::size_t cols;
+  std::size_t stride;
+
+  double* row(std::size_t i) const { return data + i * stride; }
+
+  operator ConstGridView() const { return ConstGridView{data, rows, cols, stride}; }
+};
+
 class Grid {
 private:
   static constexpr std::size_t kAlignmentBytes = 64;
@@ -78,8 +103,10 @@ public:
   std::size_t cols() const { return cols_; }
   std::size_t stride() const { return stride_; }
 
-  double* data() { return data_.data(); }
-  const double* data() const { return data_.data(); }
+  // No allocation and no element copies: a view is four words by value, and
+  // it is the only way to the storage, so every caller carries the stride.
+  GridView view() { return GridView{data_.data(), rows_, cols_, stride_}; }
+  ConstGridView view() const { return ConstGridView{data_.data(), rows_, cols_, stride_}; }
 
   double& operator()(std::size_t i, std::size_t j) { return data_[i * stride_ + j]; }
   double  operator()(std::size_t i, std::size_t j) const { return data_[i * stride_ + j]; }
@@ -126,31 +153,28 @@ inline void apply_stencil(const Grid& old_grid, Grid& new_grid) {
   assert(&old_grid != &new_grid);
   assert(old_grid.rows() == new_grid.rows() && old_grid.cols() == new_grid.cols());
 
-  const std::size_t rows = old_grid.rows();
-  const std::size_t cols = old_grid.cols();
-  const std::size_t stride = old_grid.stride();  // same shape, so same stride
+  const ConstGridView in = old_grid.view();
+  const GridView out = new_grid.view();
+  const std::size_t rows = in.rows;
+  const std::size_t cols = in.cols;
 
   if (rows == 0 || cols == 0) {
     return;
   }
 
-  const double* src = old_grid.data();
-  double* dst = new_grid.data();
-
   if (rows < 3 || cols < 3) {
     // Every cell is boundary, so the result is a copy. Copying the whole
     // storage, padding included, is exactly the traffic of a row-by-row copy
     // without the per-row bookkeeping.
-    std::memcpy(dst, src, rows * stride * sizeof(double));
+    std::memcpy(out.data, in.data, rows * in.stride * sizeof(double));
     return;
   }
 
-  std::memcpy(dst, src, cols * sizeof(double));
-  std::memcpy(dst + (rows - 1) * stride, src + (rows - 1) * stride, cols * sizeof(double));
+  std::memcpy(out.row(0), in.row(0), cols * sizeof(double));
+  std::memcpy(out.row(rows - 1), in.row(rows - 1), cols * sizeof(double));
 
 #pragma omp parallel for schedule(static)
   for (std::size_t i = 1; i < rows - 1; ++i) {
-    const double* mid = src + i * stride;
-    detail::stencil_row(mid - stride, mid, mid + stride, dst + i * stride, cols);
+    detail::stencil_row(in.row(i - 1), in.row(i), in.row(i + 1), out.row(i), cols);
   }
 }
